@@ -13,34 +13,18 @@ import { ScriptError, Track } from "../models";
 
 const FAVORITE_CONFIRMATION_TIMEOUT_MS = 10_000;
 const FAVORITE_POLL_INTERVAL_MS = 250;
-const FAVORITE_TRACK_ID_MISMATCH = "__TRACK_ID_MISMATCH__";
 
 const isSonomaOrNewer = (versionMajor: number) => versionMajor >= 14;
 const isTrackFavorited = (status: string) => status.trim().toLowerCase() === "true";
 const getFavoriteErrorMessage = (error: Error | ScriptError) =>
   "shortMessage" in error && typeof error.shortMessage === "string" ? error.shortMessage : error.message;
-const getFavoritePropertyByVersion = (versionMajor: number) => (isSonomaOrNewer(versionMajor) ? "favorited" : "loved");
 const getFavoriteCommand = (versionMajor: number) =>
-  `get ${getFavoritePropertyByVersion(versionMajor)} of current track`;
+  isSonomaOrNewer(versionMajor) ? "get favorited of current track" : "get loved of current track";
 const getSetFavoriteCommand = (versionMajor: number, targetState: boolean) =>
   isSonomaOrNewer(versionMajor)
     ? `set favorited of current track to ${targetState.toString()}`
     : `set loved of current track to ${targetState.toString()}`;
 const getFavoriteByVersion = (versionMajor: number) => tell("Music", getFavoriteCommand(versionMajor));
-const escapeAppleScriptString = (value: string) => value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-const getFavoriteForCurrentTrackIdByVersion = (versionMajor: number, trackId: string) =>
-  runScript(`
-    tell application "Music"
-      set expectedTrackId to "${escapeAppleScriptString(trackId)}"
-      set currentTrackId to (id of current track) as text
-
-      if currentTrackId is not expectedTrackId then
-        return "${FAVORITE_TRACK_ID_MISMATCH}"
-      end if
-
-      return (${getFavoritePropertyByVersion(versionMajor)} of current track) as text
-    end tell
-  `);
 const waitForFavoritePollInterval = pipe(
   TE.right(undefined),
   TE.chainFirstTaskK(
@@ -117,12 +101,6 @@ export const getFavorite = pipe(
   TE.tryCatch(() => getMacosVersion(), E.toError),
   TE.chainW((version) => getFavoriteByVersion(version.major)),
 );
-export const getFavoriteForCurrentTrackId = (trackId: string): TE.TaskEither<Error | ScriptError, string | undefined> =>
-  pipe(
-    TE.tryCatch(() => getMacosVersion(), E.toError),
-    TE.chainW((version) => getFavoriteForCurrentTrackIdByVersion(version.major, trackId)),
-    TE.map((favoriteStatus) => (favoriteStatus === FAVORITE_TRACK_ID_MISMATCH ? undefined : favoriteStatus)),
-  );
 export const favorite = setFavoriteWithConfirmation(true);
 export const unfavorite = setFavoriteWithConfirmation(false);
 export const getDislike = tell("Music", "get disliked of current track");
@@ -222,42 +200,50 @@ export const addToPlaylist = (playlist: string) =>
   );
 
 export const getCurrentTrack = (): TE.TaskEither<Error, Readonly<Track>> => {
-  const querystring = createQueryString({
-    id: "trackId",
-    name: "trackName",
-    artist: "trackArtist",
-    album: "trackAlbum",
-    duration: "trackDuration",
-    rating: "trackRating",
-  });
-
-  // prettier-ignore
   return pipe(
-    runScript(`
-      set output to ""
-      tell application "System Events"
-        set isNotRunning to (count of (every process whose name is "Music")) = 0
-      end tell
+    TE.tryCatch(() => getMacosVersion(), E.toError),
+    TE.chainW((version) => {
+      const favProp = isSonomaOrNewer(version.major) ? "favorited" : "loved";
+      const querystring = createQueryString({
+        id: "trackId",
+        name: "trackName",
+        artist: "trackArtist",
+        album: "trackAlbum",
+        duration: "trackDuration",
+        rating: "trackRating",
+        favorited: "trackFavorited",
+      });
 
-      if isNotRunning then
-        error
-      else
-        tell application "Music"
-          set t to (get current track)
-          set trackId to id of t
-          set trackName to name of t
-          set trackArtist to artist of t
-          set trackAlbum to album of t
-          set trackDuration to duration of t
-          set trackRating to rating of t
+      // prettier-ignore
+      return pipe(
+        runScript(`
+          set output to ""
+          tell application "System Events"
+            set isNotRunning to (count of (every process whose name is "Music")) = 0
+          end tell
 
-          set output to ${querystring}
-        end tell
-      end if
+          if isNotRunning then
+            error
+          else
+            tell application "Music"
+              set t to (get current track)
+              set trackId to id of t
+              set trackName to name of t
+              set trackArtist to artist of t
+              set trackAlbum to album of t
+              set trackDuration to duration of t
+              set trackRating to rating of t
+              set trackFavorited to ${favProp} of t
 
-      return output
-    `),
-    TE.map(parseQueryString<Track>())
+              set output to ${querystring}
+            end tell
+          end if
+
+          return output
+        `),
+        TE.map(parseQueryString<Track>()),
+      );
+    }),
   );
 };
 
